@@ -29,7 +29,7 @@ from xmodule.modulestore.django import modulestore
 from openedx.core.djangoapps.course_groups.cohorts import (
     is_course_cohorted, is_cohort_exists, add_cohort, add_user_to_cohort, remove_user_from_cohort, get_cohort_by_name,
 )
-from openedx.core.djangoapps.course_groups.models import CourseUserGroup
+from openedx.core.djangoapps.course_groups.models import CourseUserGroup, CourseCohort
 from openedx.core.djangoapps.user_api.preferences.api import update_email_opt_in
 from openedx.core.lib.api.authentication import (
     SessionAuthenticationAllowInactiveUser,
@@ -52,6 +52,7 @@ from .data import get_course_enrollments, get_user_proctored_exams
 
 log = logging.getLogger(__name__)
 VERIFIED = 'verified'
+DEFAULT_COHORT_NAME = "Default Group"
 
 
 class LibrariesList(ListAPIView):
@@ -599,7 +600,24 @@ class UpdateVerifiedCohort(APIView, ApiKeyPermissionMixIn):
 
         # remove user from verified cohort
         if action == u'delete':
+            default_cohort = CourseUserGroup.objects.filter(
+                course_id=course_key,
+                name__icontains="default",
+                group_type=CourseUserGroup.COHORT
+            ).first()
+            if not default_cohort:
+                default_cohort = CourseCohort.create(
+                    cohort_name=DEFAULT_COHORT_NAME,
+                    course_id=course_key,
+                    assignment_type=CourseCohort.RANDOM
+                ).course_user_group
             if not course_cohorts.exists() or course_cohorts[0].name != cohort.name:
+                try:
+                    add_user_to_cohort(default_cohort, user.username)
+                except ValueError:
+                    log.warning("User {} already present in the cohort {}".format(user.username, default_cohort.name))
+                except Exception as e:
+                    log.error(e)
                 return Response(
                     status=status.HTTP_200_OK,
                     data={"message": u"User {username} already was removed from cohort {cohort_name}".format(
@@ -615,6 +633,12 @@ class UpdateVerifiedCohort(APIView, ApiKeyPermissionMixIn):
                         username=username,
                         cohort_name=cohort.name
                     ))
+                try:
+                    add_user_to_cohort(default_cohort, user.username)
+                except ValueError:
+                    log.warning("User {} already present in the cohort {}".format(user.username, default_cohort.name))
+                except Exception as e:
+                    log.error(e)
                 return Response(
                     status=status.HTTP_200_OK,
                     data={"message": u"User {username} removed from cohort {cohort_name}".format(
