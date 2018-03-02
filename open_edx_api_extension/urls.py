@@ -21,4 +21,6 @@ urlpatterns = [
         name='edx_proctoring.anonymous.proctoring_poll_statuses_attempts'),
     url(r'edx_proctoring/attempts_bulk_update/$', views.AttemptsBulkUpdate.as_view(),
         name='edx_proctoring.attempts_bulk_update'),
+    url(r'edx_proctoring/exam/(?P<exam_id>\d+)/room$', views.ExamRoom.as_view(),
+        name='edx_proctoring.exam_room'),
 ]

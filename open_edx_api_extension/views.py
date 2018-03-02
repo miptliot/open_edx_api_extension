@@ -52,14 +52,18 @@ log = logging.getLogger(__name__)
 VERIFIED = 'verified'
 
 try:
-    from edx_proctoring.models import ProctoredExamStudentAttempt, ProctoredExamStudentAttemptCustom, ProctoredCourse
+    from edx_proctoring.models import ProctoredExamStudentAttempt, ProctoredExamStudentAttemptCustom, \
+        ProctoredCourse, ProctoredExam, ProctoredExamRoom
     from edx_proctoring.api import remove_exam_attempt, _get_exam_attempt, update_attempt_status
 except ImportError:
     ProctoredExamStudentAttempt = None
     ProctoredExamStudentAttemptCustom = None
     ProctoredCourse = None
+    ProctoredExam = None
+    ProctoredExamRoom = None
     _get_exam_attempt = None
     update_attempt_status = None
+from edx_proctoring.utils import AuthenticatedAPIView
 from .data import get_course_enrollments, get_user_proctored_exams, get_course_calendar
 from .models import CourseUserResultCache
 from .utils import student_grades
@@ -1035,7 +1039,7 @@ class AttemptStatuses(APIView):
         )
 
 
-class AttemptsBulkUpdate(APIView):
+class AttemptsBulkUpdate(APIView, ApiKeyPermissionMixIn):
     """
         **Use Cases**
             This endpoint is called by a 3rd party proctoring review service to update group of attempts.
@@ -1106,3 +1110,68 @@ class AttemptsBulkUpdate(APIView):
             data=result,
             status=200
         )
+
+
+class ExamRoom(APIView, ApiKeyPermissionMixIn):
+    """
+        **Use Cases**
+            This endpoint is called by a 3rd party proctoring review to create/close exam room.
+
+        **Example Requests**:
+
+            POST /api/extended/edx_proctoring/exam/42/room
+
+        **Post Parameters**
+
+            * JSON body in format
+               {'testing_center': '...', 'status': '...'}
+
+        **Response Values**
+
+            200 - OK
+            400 - bad request (wrong params or request body)
+            403 - if you try to create new room but it already exists 
+            404 - if you try to update some room but it doesn't exist
+
+    """
+    def post(self, request, exam_id):
+        """
+        Create/close exam room
+        """
+        try:
+            posted_data = json.loads(request.body.decode('utf-8'))
+            testing_center = posted_data.get('testing_center')
+            new_status = posted_data.get('status')
+        except (ValueError, KeyError) as e:
+            return HttpResponse(
+                content='Invalid request body.',
+                status=400
+            )
+
+        if not new_status or not ProctoredExamRoom.status_exists(new_status):
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            exam = ProctoredExam.objects.get(pk=exam_id)
+        except ProctoredExam.DoesNotExist:
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+        room = None
+
+        if new_status == ProctoredExamRoom.IN_PROGRESS:
+            try:
+                ProctoredExamRoom.objects.get(exam=exam, status=new_status)
+                return Response(status=status.HTTP_403_FORBIDDEN)
+            except ProctoredExamRoom.DoesNotExist:
+                room = ProctoredExamRoom(exam=exam, testing_center=testing_center)
+        elif new_status == ProctoredExamRoom.ARCHIVED:
+            try:
+                room = ProctoredExamRoom.objects.get(exam=exam, status=ProctoredExamRoom.IN_PROGRESS)
+            except ProctoredExamRoom.DoesNotExist:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+
+        if room:
+            room.status = new_status
+            room.save()
+            return Response(data={'id': room.id, 'status': new_status}, status=200)
+        return Response(status=status.HTTP_400_BAD_REQUEST)
