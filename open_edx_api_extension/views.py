@@ -31,7 +31,7 @@ from xmodule.modulestore.django import modulestore
 
 from openedx.core.djangoapps.course_groups.cohorts import (
     is_course_cohorted, is_cohort_exists, add_cohort, add_user_to_cohort, remove_user_from_cohort, get_cohort_by_name,
-    get_cohort_names, get_course_cohorts, CourseCohort, set_course_cohort_settings
+    get_cohort_names, get_course_cohorts, CourseCohort, set_course_cohorted
 )
 from openedx.core.djangoapps.course_groups.models import CourseUserGroup
 from openedx.core.djangoapps.user_api.preferences.api import update_email_opt_in
@@ -1484,7 +1484,7 @@ class CourseCohortsWithStudents(CohortValidationMixin, APIView):
             return Response(data=data, status=status.HTTP_400_BAD_REQUEST)
         course_key = CourseKey.from_string(course_id)
         if not is_course_cohorted(course_key):
-            set_course_cohort_settings(course_key, is_cohorted=True)
+            set_course_cohorted(course_key, is_cohorted=True)
 
         cohorts_dict = request.data.get('cohorts')
         if not isinstance(cohorts_dict, dict):
