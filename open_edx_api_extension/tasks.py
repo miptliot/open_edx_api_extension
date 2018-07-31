@@ -17,8 +17,8 @@ from lms.djangoapps.grades.new.course_grade_factory import CourseGradeFactory
 from lms.djangoapps.instructor_task.api_helper import submit_task
 from lms.djangoapps.instructor_task.models import ReportStore
 from lms.djangoapps.instructor_task.tasks_base import BaseInstructorTask
-from lms.djangoapps.instructor_task.tasks_helper.runner run_main_task, TaskProgress
-from lms.djangoapps.instructor_task.tasks_helper.utils upload_csv_to_report_store
+from lms.djangoapps.instructor_task.tasks_helper.runner import run_main_task, TaskProgress
+from lms.djangoapps.instructor_task.tasks_helper.utils import upload_csv_to_report_store
 from lms.djangoapps.teams.models import CourseTeamMembership
 from lms.djangoapps.verify_student.models import SoftwareSecurePhotoVerification
 from openedx.core.djangoapps.course_groups.cohorts import is_course_cohorted, get_cohort
