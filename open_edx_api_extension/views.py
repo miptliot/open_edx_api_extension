@@ -1025,7 +1025,7 @@ class CalculateUsersGradeReport(APIView):
                 "course_id": "course-v1:edX+DemoX+Demo_Course"
                 "users": ["test", "test2"],
                 "staff_username": "instructor_username",
-                "callback_url": "plp.npoed.ru/grade_handle/"
+                "callback_url": "plp.tp.ru/grade_handle/"
             }
 
         **Response Values**
