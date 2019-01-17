@@ -31,6 +31,7 @@ from xmodule.modulestore.django import modulestore
 
 from openedx.core.djangoapps.course_groups.cohorts import (
     is_course_cohorted, is_cohort_exists, add_cohort, add_user_to_cohort, remove_user_from_cohort, get_cohort_by_name,
+    get_cohort_names, get_course_cohorts, CourseCohort, set_course_cohorted
 )
 from openedx.core.djangoapps.course_groups.models import CourseUserGroup
 from openedx.core.djangoapps.user_api.preferences.api import update_email_opt_in
@@ -46,16 +47,18 @@ from enrollment.errors import (
     CourseModeNotFoundError, CourseEnrollmentExistsError
 )
 from enrollment.views import ApiKeyPermissionMixIn, EnrollmentCrossDomainSessionAuth, EnrollmentListView
-from instructor.views.api import require_level
-from instructor_task.api_helper import AlreadyRunningError
-from instructor_task.models import ReportStore
+from lms.djangoapps.instructor.views.api import require_level
+from lms.djangoapps.instructor_task.api_helper import AlreadyRunningError
+from lms.djangoapps.instructor_task.models import ReportStore
+
+from course_blocks.api import get_course_blocks
+from django.contrib.auth import get_user_model
 
 
 from track import views as track_views
 
 from open_edx_api_extension.serializers import CourseWithExamsSerializer
 
-from .data import get_course_enrollments, get_user_proctored_exams
 from .tasks import submit_calculate_grades_csv_users
 from .utils import get_custom_grade_config
 
@@ -63,13 +66,17 @@ log = logging.getLogger(__name__)
 VERIFIED = 'verified'
 
 try:
-    from edx_proctoring.models import ProctoredExamStudentAttempt
-    from edx_proctoring.api import remove_exam_attempt
+    from edx_proctoring.models import ProctoredExamStudentAttempt, ProctoredExamStudentAttemptCustom, ProctoredCourse
+    from edx_proctoring.api import remove_exam_attempt, _get_exam_attempt, update_attempt_status
 except ImportError:
     ProctoredExamStudentAttempt = None
+    ProctoredExamStudentAttemptCustom = None
+    ProctoredCourse = None
+    _get_exam_attempt = None
+    update_attempt_status = None
 from .data import get_course_enrollments, get_user_proctored_exams, get_course_calendar
 from .models import CourseUserResultCache
-from .utils import student_grades
+from .utils import student_grades, EdxPlpCohortName
 
 
 class CourseUserResult(CourseViewMixin, RetrieveAPIView):
@@ -165,6 +172,9 @@ class CourseListMixin(object):
                               OAuth2AuthenticationAllowInactiveUser)
     permission_classes = ApiKeyHeaderPermissionIsAuthenticated,
 
+    def get_courses(self):
+        return modulestore().get_courses()
+
     def get_queryset(self):
         course_ids = self.request.query_params.get('course_id', None)
 
@@ -176,12 +186,14 @@ class CourseListMixin(object):
                 course_descriptor = courses.get_course(course_key)
                 results.append(course_descriptor)
         else:
-            results = modulestore().get_courses()
+            results = self.get_courses()
 
         proctoring_system = self.request.query_params.get('proctoring_system')
         if proctoring_system:
+            if 'ITMO' in proctoring_system:
+                proctoring_system = 'ITMO'
             results = (course for course in results if
-                       course.proctoring_service == proctoring_system)
+                       proctoring_system in course.available_proctoring_services.split(','))
 
         # Ensure only course descriptors are returned.
         results = (course for course in results if
@@ -231,6 +243,12 @@ class CourseListWithExams(CourseListMixin, ListAPIView):
     Gets a list of courses with proctored exams
     """
     serializer_class = CourseWithExamsSerializer
+
+    def get_courses(self):
+        if ProctoredCourse:
+            return ProctoredCourse.fetch_all()
+        else:
+            return super(CourseListWithExams, self).get_courses()
 
 
 class SSOEnrollmentListView(EnrollmentListView):
@@ -528,7 +546,6 @@ class UpdateVerifiedCohort(APIView, ApiKeyPermissionMixIn):
         return transaction.non_atomic_requests()(super(cls, cls).as_view(**initkwargs))
 
     def post(self, request):
-        log.info(request.data)
         username = request.data.get('username')
         try:
             user = User.objects.get(username=username)
@@ -557,6 +574,7 @@ class UpdateVerifiedCohort(APIView, ApiKeyPermissionMixIn):
                     "message": u"No course '{course_id}' found for enrollment".format(course_id=course_id)
                 }
             )
+
         course_is_cohorted = is_course_cohorted(course_key)
         if not course_is_cohorted:
             log.info(u"Course {course_id} is not cohorted.".format(course_id=course_id))
@@ -673,18 +691,33 @@ class UpdateVerifiedCohort(APIView, ApiKeyPermissionMixIn):
                             )}
                     )
                 else:
-                    log.warning(u"Moving user {username} into default cohort {cohort_name} from verified in course {course_id}".format(username=username, cohort_name=default_group.name, course_id=course_id))
+                    log.info(u"Moving user {username} into default cohort {cohort_name} from verified in course {course_id}".format(username=username, cohort_name=default_group.name, course_id=course_id))
                     try:
                         add_user_to_cohort(default_group, username)
                         log.info(u"User {username} succesfully moved into default cohort {cohort_name} in course {course_id}".format(username=username, cohort_name=default_group.name, course_id=course_id))
                     except ValueError:
                         log.warning(u"User {username} already present into default cohort {cohort_name} in course {course_id}".format(username=username, cohort_name=default_group.name, course_id=course_id))
+
                     return Response(
                         status=status.HTTP_200_OK,
                         data={"message": u"User {username} already present in non-verified cohort {cohort_name} in course {course_id}".format(
                                 username=username, cohort_name=course_cohorts.first().name, course_id=course_id
                         )}
                     )
+            else:
+                add_user_to_cohort(default_group, username)
+                log.info(
+                    u"User {username} succesfully moved into default cohort {cohort_name} in course {course_id}".format(
+                        username=username, cohort_name=default_group.name, course_id=course_id))
+                return Response(
+                    status=status.HTTP_200_OK,
+                    data={
+                        "message": u"User {username} moved into default cohort {cohort_name} in course {course_id}".format(
+                            username=username,
+                            cohort_name=default_group.name,
+                            course_id=course_id
+                        )}
+                )
 
         if action == u"add":
             message = add_user_into_verified_cohort(course_cohorts, cohort, user)
@@ -837,6 +870,7 @@ class Credentials(APIView, ApiKeyPermissionMixIn):
         return Response(data=creds)
 
 
+# TODO: this one is currently deprecated, should be removed later
 @transaction.non_atomic_requests
 @ensure_csrf_cookie
 @require_level('staff')
@@ -863,7 +897,8 @@ def view_grades_csv_for_users(request, course_id):
         return JsonResponse({"status": already_running_status})
 
 
-class UsersGradeReports(APIView):#, ApiKeyPermissionMixIn):
+# TODO: this one is currently deprecated, should be removed later
+class UsersGradeReports(APIView, ApiKeyPermissionMixIn):
     """
         **Use Cases**
 
@@ -972,6 +1007,71 @@ class UsersGradeReports(APIView):#, ApiKeyPermissionMixIn):
                     current_reports[url_uname].append(url)
             answer_data[cid] = {"reports":current_reports}
         return Response(data=answer_data)
+
+
+class CalculateUsersGradeReport(APIView):
+    """
+        **Use Cases**
+
+            Allows to request grading list calculation for course it against
+            listed users. When task finished, it notifies client on given
+            callback url about the result.
+            Requires apllication/json content-type
+
+
+        **Example Requests**:
+
+            POST /api/extended/calculate_grade_reports{
+                "course_id": "course-v1:edX+DemoX+Demo_Course"
+                "users": ["test", "test2"],
+                "staff_username": "instructor_username",
+                "callback_url": "plp.tp.ru/grade_handle/"
+            }
+
+        **Response Values**
+
+            200: if task is taken in processing
+
+            400: {"error": "<Error description>"}if error occurred
+
+    """
+    authentication_classes = OAuth2AuthenticationAllowInactiveUser, SessionAuthenticationAllowInactiveUser
+    permission_classes = ApiKeyHeaderPermissionIsAuthenticated,
+
+    @classmethod
+    def as_view(cls, **initkwargs):
+        """Run as_view() non_atomic"""
+        return transaction.non_atomic_requests()(super(cls, cls).as_view(**initkwargs))
+
+    def post(self, request):
+        staff_username = request.data.get('staff_username')
+        try:
+            request.user = User.objects.get(username=staff_username)
+        except User.DoesNotExist:
+            return JsonResponse({"error": "Bad staff username:'{}'".format(staff_username)}, status=status.HTTP_400_BAD_REQUEST)
+        usernames = request.data.get('users', None)
+        if usernames is None:
+            return JsonResponse({"error": "No users in request"}, status=status.HTTP_400_BAD_REQUEST)
+        callback_url = request.data.get('callback_url', None)
+        if not callback_url:
+            return JsonResponse({"error": "No callback_url in request"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # TODO: better make it part of url scheme
+        course_id = request.data.get('course_id')
+        if not course_id:
+            return JsonResponse({"error": "No course_id in request"}, status=status.HTTP_400_BAD_REQUEST)
+
+        course_key = CourseKey.from_string(course_id)
+        if not modulestore().has_course(course_key):
+            return JsonResponse(
+                {"error": "course with id {} not found".format(course_id)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            submit_calculate_grades_csv_users(request, course_key, usernames, callback_url)
+            return JsonResponse({"status": "Started"})
+        except AlreadyRunningError:
+            return JsonResponse({"status": "AlreadyRunning"})
 
 
 def check_proctored_exams_attempt_turn_on(method):
@@ -1093,3 +1193,408 @@ class CourseCalendar(APIView, ApiKeyPermissionMixIn):
         response = HttpResponse(text, content_type=mime, status=200)
         response['Content-Disposition'] = 'attachment; filename="{}_calendar.ics"'.format(course_key_string)
         return response
+
+
+class AttemptStatuses(APIView):
+    """
+        **Use Cases**
+            This endpoint is called by a 3rd party proctoring review service to determine
+            status of an exam attempts.
+
+
+        **Example Requests**:
+
+            POST /api/extended/edx_proctoring/proctoring_poll_statuses_attempts/
+
+        **Post Parameters**
+
+            * JSON body in format {'attempts': ['<code_1>', '<code_2>', ... , '<code_n>']}
+
+        **Response Values**
+
+            200 - JSON response in format: {'<code_1>': '<status_1>', ..., '<code_n>': '<status_n>'}
+
+    """
+
+    def post(self, request):
+        """
+        Returns the statuses of an exam attempts.
+        Similar to the /api/edx_proctoring/proctoring_poll_status/<attempt_code> but for more than 1 attempt_code.
+        """
+
+        try:
+            posted_data = json.loads(request.body.decode('utf-8'))
+            attempts_codes = posted_data.get('attempts')
+            if not isinstance(attempts_codes, list):
+                raise ValueError("'attempts' value in JSON request must be list")
+            if not attempts_codes:
+                raise ValueError("'attempts' list is empty")
+        except (ValueError, KeyError) as e:
+            return HttpResponse(
+                content='Invalid request body.',
+                status=400
+            )
+
+        attempts_dict = {attempt_code: None for attempt_code in attempts_codes}
+        attempts = ProctoredExamStudentAttempt.objects.filter(attempt_code__in=attempts_codes)
+        for attempt in attempts:
+            exam_attempt = _get_exam_attempt(attempt)
+            attempts_dict[attempt.attempt_code] = exam_attempt['status'] if exam_attempt else None
+
+        attempt_custom_status_check = [attempt_code for attempt_code, attempt_status in attempts_dict.iteritems()
+                                       if attempt_status is None]
+        if attempt_custom_status_check:
+            attempts = ProctoredExamStudentAttemptCustom.objects.filter(attempt_code__in=attempt_custom_status_check)
+            for attempt in attempts:
+                attempts_dict[attempt.attempt_code] = attempt.status
+
+        log.info("Attempts statuses: {}".format(unicode(attempts_dict)))
+        return Response(
+            data=attempts_dict,
+            status=200
+        )
+
+
+class AttemptsBulkUpdate(APIView):
+    """
+        **Use Cases**
+            This endpoint is called by a 3rd party proctoring review service to update group of attempts.
+
+
+        **Example Requests**:
+
+            POST /api/extended/edx_proctoring/attempts_bulk_update/
+
+        **Post Parameters**
+
+            * JSON body in format
+               {'attempts': [
+                   {'code': '<code_1>', 'user_id': '<user_id_1>', 'new_status': '<new_status_1>'},
+                   ...
+                   {'code': '<code_n>', 'user_id': '<user_id_n>', 'new_status': '<new_status_n>'}
+               ]}
+
+        **Response Values**
+
+            200 - JSON response in format:
+            {
+             '<code_1>': {'status': '<new_status_1>'},
+             ...
+             '<code_n>': {'status': '<new_status_n>'}
+            }
+
+    """
+
+    permission_classes = (ApiKeyHeaderPermissionIsAuthenticated,)
+
+    def post(self, request):
+        """
+        Returns the statuses of an exam attempts.
+        """
+
+        try:
+            posted_data = json.loads(request.body.decode('utf-8'))
+            attempts = posted_data.get('attempts')
+            if not isinstance(attempts, list):
+                raise ValueError("'attempts' value in JSON request must be list")
+            if not attempts:
+                raise ValueError("'attempts' list is empty")
+        except (ValueError, KeyError) as e:
+            return HttpResponse(
+                content='Invalid request body.',
+                status=400
+            )
+
+        result = {}
+        attempts_dict = {attempt['code']: attempt for attempt in attempts}
+        attempts = ProctoredExamStudentAttempt.objects.filter(attempt_code__in=attempts_dict.keys())
+        for attempt in attempts:
+            user_id = attempts_dict[attempt.attempt_code]['user_id']
+            new_status = attempts_dict[attempt.attempt_code]['new_status']
+
+            try:
+                update_attempt_status(attempt.proctored_exam_id, user_id, new_status)
+                result[attempt.attempt_code] = {'status': new_status}
+            except Exception, e:
+                log.info("Exception during update status (new status '{}') for user_id={} attempt_id={}: {}"
+                         .format(unicode(new_status), unicode(user_id), unicode(attempt.id), unicode(e)))
+                result[attempt.attempt_code] = {'status': attempt.status}
+
+        log.info("New attempts statuses after update: {}".format(unicode(result)))
+
+        return Response(
+            data=result,
+            status=200
+        )
+
+
+class CohortValidationMixin(object):
+
+    @staticmethod
+    def is_bad_course_id(course_id, check_cohorts_enabled=True):
+        try:
+            course_key = CourseKey.from_string(course_id)
+        except (InvalidKeyError, AttributeError) as e:
+            return True
+
+        if not modulestore().has_course(course_key):
+            return "course with id {} not found".format(course_id)
+
+        if not check_cohorts_enabled:
+            return
+
+        if not is_course_cohorted(course_key):
+            return "cohorts disabled for course with id {}".format(course_id)
+
+
+class CourseCohortNames(CohortValidationMixin, APIView):
+    """
+        **Use Cases**
+
+            Allows to get names of course cohorts if they are enabled for course
+
+        **Example Requests**:
+
+            GET /api/extended/cohorts/cohort_names
+
+        **Get Parameters**
+
+            * course_id: The unique identifier for the course.
+
+        **Response Values**
+
+            400 - bad course_id or absent,
+
+            400 - {"error": "<message>"}
+
+            200 - {"cohorts": [
+                                  {"name":"cohort_name1", "mode":"honor"},
+                                  {"name":"cohort_name2", "mode":"verified"},
+                                  ...
+                              ]
+                  }
+
+    """
+
+    authentication_classes = OAuth2AuthenticationAllowInactiveUser, SessionAuthenticationAllowInactiveUser
+    permission_classes = ApiKeyHeaderPermissionIsAuthenticated,
+
+    def get(self, request):
+        course_id = request.query_params.get('course_id')
+        message = self.is_bad_course_id(course_id)
+        if message:
+            data = {"error": message} if isinstance(message, basestring) else {}
+            return Response(data=data, status=status.HTTP_400_BAD_REQUEST)
+
+        course = modulestore().get_course(CourseKey.from_string(course_id))
+        cohorts_names = get_cohort_names(course)
+        plp_names = [EdxPlpCohortName.from_edx(name) for name in cohorts_names.values()]
+        plp_names = filter(lambda x: not x.is_hidden, plp_names)
+        return Response(data={
+            "cohorts": [x.plp_dict for x in plp_names]
+        })
+
+
+class CourseCohortsWithStudents(CohortValidationMixin, APIView):
+    """
+        **Use Cases**
+
+            Allows to get cohorts with listed users or set
+            Post requires apllication/json content-type
+
+        **Example Requests**:
+
+            GET  /api/extended/cohorts/cohorts_with_students/
+
+            POST /api/extended/cohorts/cohorts_with_students/
+
+        **Get Parameters**
+
+            * course_id: The unique identifier for the course.
+
+        **Get Response Values**
+
+            400 - bad course_id or absent,
+
+            400 - {"error": "<message>"}
+
+            200 - {"cohorts": [
+                                  {"name":"cohort_name1", "mode":"honor", "usernames": ["name1", "name2", ...]},
+                                  {"name":"cohort_name2", "mode":"verified", "usernames": []},
+                                  ...
+                              ]
+                  }
+
+        **Post Parameters**
+
+            Application/json content-type
+
+            * course_id: The unique identifier for the course.
+
+            * mode: honor/verified
+
+            * cohorts: {"cohort_name1": ["user1",...], "cohort_name2": ...}
+
+        **Post Response Values**
+
+            400 - bad course_id or absent,
+
+            400 - {"error": "<message>"}
+
+            400 - {"failed":[
+                            {"username":"username1", "cohort":"cohort_name2", "error":"<reason>"},
+                            ...
+                  ]}
+
+            200 - Ok
+    """
+    authentication_classes = OAuth2AuthenticationAllowInactiveUser, SessionAuthenticationAllowInactiveUser
+    permission_classes = ApiKeyHeaderPermissionIsAuthenticated,
+
+    @classmethod
+    def as_view(cls, **initkwargs):
+        return transaction.non_atomic_requests()(super(cls, cls).as_view(**initkwargs))
+
+    def get(self, request):
+        course_id = request.query_params.get('course_id')
+        message = self.is_bad_course_id(course_id)
+        if message:
+            data = {"error": message} if isinstance(message, basestring) else {}
+            return Response(data=data, status=status.HTTP_400_BAD_REQUEST)
+
+        course = modulestore().get_course(CourseKey.from_string(course_id))
+        cohorts = get_course_cohorts(course)
+        data = []
+        for group in cohorts:
+            name = group.name
+            users = [u.username for u in group.users.all()]
+            plp_name = EdxPlpCohortName.from_edx(name)
+            if plp_name.is_hidden:
+                continue
+            plp_dict = plp_name.plp_dict
+            plp_dict["usernames"] = users
+            data.append(plp_dict)
+        return Response(data={"cohorts": data})
+
+    def post(self, request):
+        course_id = request.data.get('course_id')
+        message = self.is_bad_course_id(course_id, check_cohorts_enabled=False)
+        if message:
+            data = {"error": message} if isinstance(message, basestring) else {}
+            return Response(data=data, status=status.HTTP_400_BAD_REQUEST)
+        course_key = CourseKey.from_string(course_id)
+        if not is_course_cohorted(course_key):
+            set_course_cohorted(course_key, is_cohorted=True)
+
+        cohorts_dict = request.data.get('cohorts')
+        if not isinstance(cohorts_dict, dict):
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+        mode = request.data.get('mode')
+        try:
+            requested_cohorts = [EdxPlpCohortName.from_plp(name, mode) for name in cohorts_dict]
+        except ValueError as e:
+            return Response(data={"error": unicode(e)})
+        need_groups = [x.edx_name for x in requested_cohorts]
+
+        course = modulestore().get_course(course_key)
+        have_groups = get_cohort_names(course).values()
+        create_groups = set(need_groups) - set(have_groups)
+        for name in create_groups:
+            # TODO: can it raise with bad name?
+            add_cohort(course_key, name, assignment_type=CourseCohort.MANUAL)
+            log.info(u"Cohort '{}' for course '{}' was created".format(name, course_key))
+
+        errors = []
+        for group in requested_cohorts:
+            usernames = cohorts_dict[group.plp_name]
+            cohort = get_cohort_by_name(course_key, group.edx_name)
+            for u in usernames:
+                try:
+                    add_user_to_cohort(cohort, u)
+                    log.info(u"User '{}' was enrolled at cohort '{}'".format(u, group.edx_name))
+                except ValueError:
+                    # 'add_user_to_cohort' raises ValueError when user is already present in cohort, but it's ok
+                    pass
+                except User.DoesNotExist as e:
+                    error = {"username": u, "cohort": group.plp_name, "error": unicode(e)}
+                    errors.append(error)
+                    log.error(u"{}: {}".format(error['error'], error['username']))
+        if errors:
+            return Response(data={"failed": errors}, status=status.HTTP_400_BAD_REQUEST)
+        return Response()
+
+class CourseStructure(APIView):
+    """
+        **Use Cases**
+
+            Allows to get course structure
+
+        **Example Requests**:
+
+            GET  /api/extended/course_structure
+
+        **Get Parameters**
+
+            * course_id: The unique identifier for the course.
+
+        **Get Response Values**
+
+            400 - bad course_id or absent,
+
+            200 - {"course_id": "course-v1:...",
+                   "structure": [
+                                  {"chapter_key":"...", "section_key":"...","vertical_key":"...","ckey":"...","chapter_name":"..."},
+                                  ...
+                              ]
+                  }
+    """
+    authentication_classes = OAuth2AuthenticationAllowInactiveUser, SessionAuthenticationAllowInactiveUser
+    permission_classes = ApiKeyHeaderPermissionIsAuthenticated,
+
+    @classmethod
+    def as_view(cls, **initkwargs):
+        return transaction.non_atomic_requests()(super(cls, cls).as_view(**initkwargs))
+
+    def get(self, request):
+        def get_course_by_id(course_id):
+            try:
+                course_key = CourseKey.from_string(course_id)
+            except (InvalidKeyError, AttributeError) as e:
+                return None
+
+            if not modulestore().has_course(course_key):
+                return None
+
+            return modulestore().get_course(course_key)
+
+        def get_course_structure(course):
+            User = get_user_model()
+            student = User.objects.filter(is_superuser=True).first()
+            return get_course_blocks(student, course.location)
+
+
+        course = get_course_by_id(request.query_params.get('course_id'))
+        if not course:
+            return Response(status=status.HTTP_400_BAD_REQUEST)
+
+        response = {
+            "course_id": unicode(course.id),
+            "structure": [],
+        }
+
+        course_structure = get_course_structure(course)
+        for chapter_key in course_structure.get_children(course_structure.root_block_usage_key):
+            chapter_name = modulestore().get_item(chapter_key).display_name
+            for section_key in course_structure.get_children(chapter_key):
+                for vertical_key in course_structure.get_children(section_key):
+                    for ckey in course_structure.get_children(vertical_key):
+                        response["structure"].append({
+                            "chapter_key":  unicode(chapter_key),
+                            "section_key":  unicode(section_key),
+                            "vertical_key": unicode(vertical_key),
+                            "ckey":         unicode(ckey),
+                            "chapter_name": unicode(chapter_name),
+                        })
+
+        return Response(data=response)
