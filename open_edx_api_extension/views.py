@@ -116,7 +116,7 @@ class CourseListMixin(object):
 class CourseList(CourseListMixin, ListAPIView):
     """
     Inspired from:
-    lms.djangoapps.course_structure_api.v0.views.CourseList
+    course_api.v0.views.CourseList
 
     **Use Case**
         Get a paginated list of courses in the whole edX Platform.
