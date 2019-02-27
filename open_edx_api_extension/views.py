@@ -16,7 +16,7 @@ from bulk_email.models import Optout
 
 from openedx.core.djangoapps.cors_csrf.decorators import ensure_csrf_cookie_cross_domain
 from course_modes.models import CourseMode
-from course_api import CourseSerializer
+from course_api.serializers import CourseSerializer
 from courseware import courses
 
 from django_comment_common.models import Role, FORUM_ROLE_STUDENT
