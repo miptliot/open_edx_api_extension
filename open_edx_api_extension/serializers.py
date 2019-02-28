@@ -6,7 +6,7 @@ except ImportError:
     SkipField = Exception
 from edx_proctoring.api import get_all_exams_for_course
 
-from course_api.v0.serializers import CourseSerializer
+from course_api.serializers import CourseSerializer
 
 
 class ExamSerializerField(serializers.Field):

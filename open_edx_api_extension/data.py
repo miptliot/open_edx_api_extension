@@ -82,7 +82,7 @@ def get_user_proctored_exams(username, request):
             'id': course_id,
             'name': course.display_name,
             'uri': request.build_absolute_uri(
-                reverse('course_structure_api:v0:detail',
+                reverse('course-detail',
                         kwargs={'course_id': course_id})),
             'image_url': course.image_url,
             'start': course.start,
