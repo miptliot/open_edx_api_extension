@@ -144,7 +144,7 @@ class CourseList(CourseListMixin, ListAPIView):
             * end: The course end date. If course end date is not specified, the
               value is null.
     """
-    serializer_class = serializers.CourseSerializer
+    serializer_class = CourseSerializer
 
 
 class CourseListWithExams(CourseListMixin, ListAPIView):
