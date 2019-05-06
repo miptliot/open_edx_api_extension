@@ -16,7 +16,6 @@ from bulk_email.models import Optout
 
 from openedx.core.djangoapps.cors_csrf.decorators import ensure_csrf_cookie_cross_domain
 from course_modes.models import CourseMode
-from course_api.serializers import CourseSerializer
 from courseware import courses
 
 from django_comment_common.models import Role, FORUM_ROLE_STUDENT
@@ -54,7 +53,7 @@ from django.contrib.auth import get_user_model
 
 from track import views as track_views
 
-from open_edx_api_extension.serializers import CourseWithExamsSerializer
+from open_edx_api_extension.serializers import CourseSerializer, CourseWithExamsSerializer
 
 log = logging.getLogger(__name__)
 VERIFIED = 'verified'
@@ -440,7 +439,7 @@ class UpdateVerifiedCohort(APIView, ApiKeyPermissionMixIn):
 
             * username: The unique user id in plp and edx
 
-            * action: add - add user into verified cohort, delete - remove user from verified cohort 
+            * action: add - add user into verified cohort, delete - remove user from verified cohort
 
         **Response Values**
 
