@@ -23,4 +23,5 @@ urlpatterns = [
     url(r'^cohorts/cohort_names', views.CourseCohortNames.as_view()),
     url(r'^cohorts/cohorts_with_students', views.CourseCohortsWithStudents.as_view()),
     url(r'^course_structure$', views.CourseStructure.as_view()),
+    url(r'^reflection', views.Reflection.as_view()),
 ]

@@ -17,13 +17,15 @@ from bulk_email.models import Optout
 from openedx.core.djangoapps.cors_csrf.decorators import ensure_csrf_cookie_cross_domain
 from course_modes.models import CourseMode
 from courseware import courses
+from courseware.models import StudentModule
 
 from django_comment_common.models import Role, FORUM_ROLE_STUDENT
 from openedx.core.djangoapps.embargo import api as embargo_api
-from opaque_keys.edx.keys import CourseKey
+from opaque_keys.edx.keys import CourseKey, UsageKey
 from opaque_keys import InvalidKeyError
 from student.models import User, CourseEnrollment, CourseAccessRole
 from xmodule.modulestore.django import modulestore
+from xmodule.modulestore.exceptions import ItemNotFoundError
 
 from openedx.core.djangoapps.course_groups.cohorts import (
     is_course_cohorted, is_cohort_exists, add_cohort, add_user_to_cohort, remove_user_from_cohort, get_cohort_by_name,
@@ -1303,3 +1305,51 @@ class CourseStructure(APIView):
                         })
 
         return Response(data=response)
+
+
+class Reflection(APIView):
+    """
+        **Use Cases**
+
+            Get a list of users who have passed reflection
+
+        **Example Requests**:
+
+            GET  /api/extended/reflection
+
+        **Get Parameters**
+
+            * vertical_id: The unique identifier for the vertical with reflection questions.
+
+        **Get Response Values**
+
+            400 - bad|missed vertical_id
+
+            200 - {"users": ["179", "265", "9", "45678"]}
+    """
+
+    authentication_classes = OAuth2AuthenticationAllowInactiveUser, EnrollmentCrossDomainSessionAuth
+    permission_classes = ApiKeyHeaderPermissionIsAuthenticated,
+
+    @staticmethod
+    def get(request):
+        vertical_id = request.query_params.get('vertical_id')
+        if not vertical_id:
+            return Response(data={"error": "Parameter vertical_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            usage_key = UsageKey.from_string(vertical_id)
+        except InvalidKeyError:
+            return Response(data={"error": "Invalid vertical_id"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            vertical = modulestore().get_item(usage_key)
+        except ItemNotFoundError:
+            return Response(data={"error": "Vertical with vertical_id not found"}, status=status.HTTP_400_BAD_REQUEST)
+        finished_users = set()
+        for child in vertical.children:
+            if child.category == 'problem':
+                child_finished_users = StudentModule.objects.select_related('student').\
+                    filter(module_type='problem',
+                           module_state_key=child,
+                           state__icontains='correct_map').values_list('student__username', flat=True)
+                finished_users = set(finished_users | set(child_finished_users))
+        return Response(data={"users": list(finished_users)}, status=status.HTTP_200_OK)
